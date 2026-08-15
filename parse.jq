@@ -47,12 +47,13 @@ def blank: if . == null or . == "" or . == "null" then null else . end;
         responseTime: (if $rt == null then null else ($rt.value | num) end)
       }
   )
+# Anything that is not up sorts above everything that is, worst first.
 | sort_by(
     (if .status == "down" then 0
      elif .status == "pending" then 1
      elif .status == "maintenance" then 2
-     elif .status == "up" then 3
-     else 4 end),
+     elif .status == "up" then 4
+     else 3 end),
     (.name | ascii_downcase)
   )
 | {

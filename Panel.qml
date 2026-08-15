@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -30,11 +31,16 @@ Panel {
   property color upColor: Color.accent
   property color pendingColor: Color.accent
 
-  // The Uptime Kuma mark, green normally and red-shaded when something is
-  // wrong. Two prepared files rather than a runtime tint, so a down state can
-  // never fall back to the healthy colour (see assets/regenerate.sh).
-  readonly property string logoSource: pluginDir + (hasIssue ? "/assets/uptime-kuma-alert.svg" : "/assets/uptime-kuma.svg")
+  // The Uptime Kuma mark, verbatim upstream art, recoloured at render time:
+  // the bar's own foreground while healthy, so it sits with the rest of the
+  // bar, and the theme's urgent colour the moment something is wrong.
+  readonly property string logoSource: pluginDir + "/assets/uptime-kuma-mark.svg"
   readonly property bool hasIssue: configured && (!ok || down > 0)
+  // A literal red, not the theme's urgent colour: themes tint urgent towards
+  // their own palette (salmon, maroon, orange), and an outage should read as
+  // red on every theme.
+  readonly property color alertColor: "#e01b24"
+  readonly property color logoColor: hasIssue ? alertColor : foreground
 
   // Nerd Font glyphs, verified against the shell's font.
   readonly property string glyphSetup: String.fromCodePoint(0xF013)
@@ -87,7 +93,7 @@ Panel {
 
   readonly property color statusColor: {
     if (!configured) return pendingColor
-    if (!ok || down > 0) return urgent
+    if (hasIssue) return urgent
     if (pending > 0) return pendingColor
     return foreground
   }
@@ -96,13 +102,14 @@ Panel {
   readonly property string barCount: (configured && ok && down > 0) ? String(down) : ""
 
   readonly property string tooltip: {
-    if (!configured) return "Uptime Kuma — click to set up"
-    if (!ok) return "Uptime Kuma — " + (String(state.error || "unavailable"))
+    if (!configured) return "Uptime Kuma · click to set up"
+    if (!ok) return "Uptime Kuma · " + (String(state.error || "unavailable"))
     var parts = [up + " up"]
     if (down > 0) parts.push(down + " down")
     if (pending > 0) parts.push(pending + " pending")
     if (maintenance > 0) parts.push(maintenance + " in maintenance")
-    return "Uptime Kuma — " + parts.join(" · ")
+    if (lastUpdated !== "") parts.push("checked " + lastUpdated)
+    return "Uptime Kuma · " + parts.join(" · ")
   }
 
   visible: true
@@ -138,9 +145,15 @@ Panel {
     pendingColor = found["yellow"] || Color.accent
   }
 
+  // The bar documents a shellQuote() helper but does not actually expose one,
+  // so quote here. Single quotes with the '\'' escape are safe for any URL.
+  function shellQuote(value) {
+    return "'" + String(value).replace(/'/g, "'\\''") + "'"
+  }
+
   function openDashboard() {
     if (!bar || dashboard === "") return
-    bar.run("xdg-open " + bar.shellQuote(dashboard))
+    bar.run("xdg-open " + shellQuote(dashboard))
     close()
   }
 
@@ -204,8 +217,11 @@ Panel {
   }
 
   function monitorDetail(monitor) {
-    var target = String(monitor.url || monitor.hostname || "")
     var kind = String(monitor.type || "")
+    var target = String(monitor.url || monitor.hostname || "")
+    // Monitors with no URL of their own — groups above all, but also ping and
+    // push — are reported with a bare scheme. That is noise, not a target.
+    if (/^https?:\/\/?$/.test(target)) target = ""
     if (target !== "" && kind !== "") return kind + "  ·  " + target
     return target !== "" ? target : kind
   }
@@ -219,12 +235,12 @@ Panel {
     return "ALL SYSTEMS UP"
   }
 
+  // Only the setup form earns a detail pill. The monitor count is already in
+  // the MONITORS header and the check time lives in the bar tooltip, so the
+  // status views keep the header to one line.
   function heroDetail() {
     if (showSetup) return configured ? "Update the connection" : "Connect your instance"
-    if (!ok) return String(state.error || "Could not reach Uptime Kuma")
-    var detail = total + (total === 1 ? " active monitor" : " active monitors")
-    if (lastUpdated !== "") detail += "  ·  " + lastUpdated
-    return detail
+    return ""
   }
 
   onOpenedChanged: if (opened) {
@@ -330,20 +346,10 @@ Panel {
       anchors.centerIn: parent
       spacing: Style.space(3)
 
-      Image {
-        id: barLogo
+      KumaMark {
         visible: root.configured
-        width: Style.space(15)
-        height: width
+        size: Style.space(15)
         anchors.verticalCenter: parent.verticalCenter
-        source: root.configured ? root.logoSource : ""
-        // Rasterise above the drawn size so the mark stays crisp on scaled
-        // outputs and while the bar animates.
-        sourceSize.width: Math.round(width * 3)
-        sourceSize.height: Math.round(width * 3)
-        fillMode: Image.PreserveAspectFit
-        smooth: true
-        asynchronous: true
       }
 
       Text {
@@ -374,7 +380,11 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight, Style.space(640))
+    // Header and footer are pinned, so the panel asks for their full height
+    // plus whatever the scrolling middle wants, and the cap does the rest.
+    contentHeight: panel.fittedContentHeight(
+      headerColumn.implicitHeight + bodyColumn.implicitHeight + footerColumn.implicitHeight + Style.space(24),
+      Style.space(640))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -399,11 +409,114 @@ Panel {
         else if (text === "s" || text === "S") root.openSetup()
       }
 
+      // ── Pinned header ─────────────────────────────────────────────────
+
+      Column {
+        id: headerColumn
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        spacing: Style.space(12)
+
+        PanelHero {
+          width: parent.width
+          title: "Uptime Kuma"
+          meta: root.heroMeta()
+          detail: root.heroDetail()
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+
+          iconComponent: Component {
+            Item {
+              implicitWidth: Style.font.display
+              implicitHeight: Style.font.display
+
+              KumaMark {
+                visible: !root.showSetup
+                anchors.centerIn: parent
+                size: parent.implicitWidth
+              }
+
+              Text {
+                anchors.centerIn: parent
+                visible: root.showSetup
+                text: root.glyphSetup
+                // In the form the icon is chrome, not status — only an
+                // unconfigured instance tints it, as a nudge to finish setup.
+                color: root.configured ? root.foreground : root.pendingColor
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.display
+              }
+            }
+          }
+
+          trailingControl: Component {
+            PanelActionButton {
+              visible: root.configured && !root.showSetup
+              iconText: root.glyphSetup
+              tooltipText: "Settings"
+              foreground: root.dim
+              hoverColor: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.openSetup()
+            }
+          }
+        }
+
+        PanelSeparator {
+          visible: !root.showSetup && root.ok
+          foreground: root.foreground
+        }
+
+        Column {
+          visible: !root.showSetup && root.ok
+          width: parent.width
+          spacing: Style.space(8)
+
+          PanelSectionHeader {
+            text: "OVERVIEW"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+
+            SummaryCell { label: "Up"; value: root.up; active: root.up > 0; tone: root.upColor }
+            SummaryCell { label: "Down"; value: root.down; active: root.down > 0; tone: root.urgent }
+            SummaryCell { label: "Pending"; value: root.pending; active: root.pending > 0; tone: root.pendingColor }
+            SummaryCell { label: "Maint"; value: root.maintenance; active: root.maintenance > 0; tone: root.foreground }
+          }
+        }
+
+        PanelSeparator {
+          visible: !root.showSetup && root.ok && root.monitors.length > 0
+          foreground: root.foreground
+        }
+
+        // Pinned with the overview, so the list scrolls under a stable label.
+        PanelSectionHeader {
+          width: parent.width
+          visible: !root.showSetup && root.ok && root.monitors.length > 0
+          text: "MONITORS  ·  " + root.total
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+      }
+
+      // ── Scrolling middle ──────────────────────────────────────────────
+
       Flickable {
         id: monitorFlick
-        anchors.fill: parent
+        anchors.top: headerColumn.bottom
+        anchors.bottom: footerColumn.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.topMargin: Style.space(12)
+        anchors.bottomMargin: root.showSetup ? 0 : Style.space(8)
         contentWidth: width
-        contentHeight: contentColumn.implicitHeight
+        contentHeight: bodyColumn.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
@@ -411,69 +524,17 @@ Panel {
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
         Column {
-          id: contentColumn
+          id: bodyColumn
           width: monitorFlick.width
           spacing: Style.space(12)
 
-          PanelHero {
-            width: parent.width
-            title: "Uptime Kuma"
-            meta: root.heroMeta()
-            detail: root.heroDetail()
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-
-            iconComponent: Component {
-              Item {
-                implicitWidth: Style.font.display
-                implicitHeight: Style.font.display
-
-                Image {
-                  anchors.fill: parent
-                  visible: !root.showSetup
-                  source: root.showSetup ? "" : root.logoSource
-                  sourceSize.width: Math.round(width * 3)
-                  sourceSize.height: Math.round(height * 3)
-                  fillMode: Image.PreserveAspectFit
-                  smooth: true
-                  asynchronous: true
-                }
-
-                Text {
-                  anchors.centerIn: parent
-                  visible: root.showSetup
-                  text: root.glyphSetup
-                  // In the form the icon is chrome, not status — only an
-                  // unconfigured instance tints it, as a nudge to finish setup.
-                  color: root.configured ? root.foreground : root.pendingColor
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.display
-                }
-              }
-            }
-
-            trailingControl: Component {
-              PanelActionButton {
-                visible: root.configured && !root.showSetup
-                iconText: root.glyphSetup
-                tooltipText: "Settings"
-                foreground: root.dim
-                hoverColor: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: root.openSetup()
-              }
-            }
-          }
-
-          // ── Setup form ────────────────────────────────────────────────
+          // ── Setup form ──────────────────────────────────────────────
 
           Column {
             id: setupColumn
             visible: root.showSetup
             width: parent.width
             spacing: Style.space(10)
-
-            PanelSeparator { foreground: root.foreground }
 
             PanelSectionHeader {
               width: parent.width
@@ -583,7 +644,7 @@ Panel {
             }
           }
 
-          // ── Error state ───────────────────────────────────────────────
+          // ── Error state ─────────────────────────────────────────────
 
           Column {
             visible: !root.showSetup && !root.ok
@@ -626,51 +687,12 @@ Panel {
             }
           }
 
-          // ── Monitors ──────────────────────────────────────────────────
-
-          PanelSeparator {
-            visible: !root.showSetup && root.ok
-            foreground: root.foreground
-          }
-
-          Column {
-            visible: !root.showSetup && root.ok
-            width: parent.width
-            spacing: Style.space(8)
-
-            PanelSectionHeader {
-              text: "OVERVIEW"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Row {
-              width: parent.width
-              spacing: Style.space(8)
-
-              SummaryCell { label: "Up"; value: root.up; active: root.up > 0; tone: root.upColor }
-              SummaryCell { label: "Down"; value: root.down; active: root.down > 0; tone: root.urgent }
-              SummaryCell { label: "Pending"; value: root.pending; active: root.pending > 0; tone: root.pendingColor }
-              SummaryCell { label: "Maint"; value: root.maintenance; active: root.maintenance > 0; tone: root.foreground }
-            }
-          }
-
-          PanelSeparator {
-            visible: !root.showSetup && root.ok && root.monitors.length > 0
-            foreground: root.foreground
-          }
+          // ── Monitors ────────────────────────────────────────────────
 
           Column {
             visible: !root.showSetup && root.ok && root.monitors.length > 0
             width: parent.width
             spacing: Style.space(8)
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "MONITORS  ·  " + root.total
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
 
             Repeater {
               model: root.monitors
@@ -682,18 +704,73 @@ Panel {
               }
             }
           }
-
-          Text {
-            visible: !root.showSetup && root.ok
-            width: parent.width
-            text: "R refresh  ·  O dashboard  ·  S settings  ·  Esc close"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            horizontalAlignment: Text.AlignHCenter
-            topPadding: Style.space(4)
-          }
         }
+      }
+
+      // ── Pinned footer ─────────────────────────────────────────────────
+
+      Column {
+        id: footerColumn
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        spacing: Style.space(8)
+        visible: !root.showSetup
+
+        PanelSeparator {
+          visible: root.ok && root.monitors.length > 0
+          foreground: root.foreground
+          strength: 0.07
+        }
+
+        Text {
+          width: parent.width
+          text: "R refresh  ·  O dashboard  ·  S settings  ·  Esc close"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          horizontalAlignment: Text.AlignHCenter
+        }
+      }
+    }
+  }
+
+  // The upstream mark, recoloured to a flat theme colour the way the bar
+  // recolours symbolic tray icons: the art is layered and hidden, and the
+  // effect draws it.
+  component KumaMark: Item {
+    id: kumaMark
+    property real size: Style.space(22)
+
+    implicitWidth: size
+    implicitHeight: size
+    width: size
+    height: size
+
+    Image {
+      id: kumaImage
+      anchors.fill: parent
+      source: root.logoSource
+      // Rasterise above the drawn size so the mark stays crisp on scaled
+      // outputs and while the bar animates.
+      sourceSize.width: Math.round(kumaMark.size * 3)
+      sourceSize.height: Math.round(kumaMark.size * 3)
+      fillMode: Image.PreserveAspectFit
+      smooth: true
+      asynchronous: true
+      visible: false
+      layer.enabled: true
+    }
+
+    MultiEffect {
+      anchors.fill: kumaImage
+      source: kumaImage
+      colorization: 1.0
+      colorizationColor: root.logoColor
+
+      Behavior on colorizationColor {
+        enabled: !root.bar || root.bar.foregroundAnimationEnabled
+        ColorAnimation { duration: 160 }
       }
     }
   }

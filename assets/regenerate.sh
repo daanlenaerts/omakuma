@@ -1,23 +1,15 @@
 #!/usr/bin/env bash
-# Regenerate the bar-legible Kuma marks from the upstream logo.
+# Derive the bar mark from the upstream Uptime Kuma logo.
 #
-# upstream-icon.svg is louislam/uptime-kuma public/icon.svg, verbatim (MIT).
-# Two changes make it readable at 15-26px in a status bar:
+# uptime-kuma.svg is louislam/uptime-kuma public/icon.svg, verbatim (MIT).
 #
-#   viewBox 0 0 640 640 -> 85 85 470 470   the artwork occupies only the middle
-#                                          422x372 of the canvas; the rest is
-#                                          empty halo that shrinks the mark
-#   stroke-width 200 -> 44                 the translucent halo is ~1/3 of the
-#                                          icon at bar sizes and blurs the shape
-#
-# The alert mark swaps the gradient stops for the same colors hue-rotated to
-# red (identical saturation and lightness), so it reads as the same logo with
-# red shading rather than a flat red tint.
+# The only change: the logo's 200px translucent halo is drawn in near-white,
+# which is decoration for a light background. The bar recolours the mark to a
+# single theme colour (like a symbolic tray icon), and under that recolouring
+# the halo becomes a heavy dark ring that swamps the shape at 15-26px. Dropping
+# the stroke leaves the artwork's own path untouched.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
-tighten() { sed 's|viewBox="0 0 640 640"|viewBox="85 85 470 470"|; s|stroke-width: 200|stroke-width: 44|' upstream-icon.svg; }
-
-tighten > uptime-kuma.svg
-tighten | sed 's|#5CDD8B|#DD5A5A|; s|#86E6A9|#E78383|' > uptime-kuma-alert.svg
-echo "wrote uptime-kuma.svg uptime-kuma-alert.svg"
+sed 's|stroke-width: 200|stroke-width: 0|' uptime-kuma.svg > uptime-kuma-mark.svg
+echo "wrote uptime-kuma-mark.svg"
