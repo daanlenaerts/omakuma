@@ -8,6 +8,8 @@ response time.
 The bar stays quiet while everything is healthy — just the Kuma mark. The
 moment a monitor goes down the mark turns red and picks up a count.
 
+![The Uptime Kuma panel listing active monitors](screenshot.png)
+
 ## How it works
 
 The plugin polls Uptime Kuma's Prometheus endpoint (`GET /metrics`) with an API
