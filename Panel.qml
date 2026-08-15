@@ -12,9 +12,21 @@ Panel {
   moduleName: "daan.uptime-kuma"
   ipcTarget: "daan.uptime-kuma"
 
-  readonly property color foreground: bar ? bar.barForeground : Color.foreground
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
-  readonly property color dim: Qt.darker(foreground, 1.4)
+  // The bar and its popup can intentionally use opposite contrast schemes.
+  // Keep their text roles separate instead of carrying the bar foreground
+  // onto the popup surface.
+  readonly property color barForeground: bar ? bar.barForeground : Color.bar.text
+  readonly property color foreground: Color.popups.text
+  readonly property color panelBackground: Color.popups.background
+  readonly property bool lightTheme: (panelBackground.r * 0.299 + panelBackground.g * 0.587 + panelBackground.b * 0.114) > 0.55
+  // Qt.darker() only produces a secondary tone on dark themes. Blend toward
+  // the theme's muted role instead, which stays subordinate while retaining
+  // readable contrast on both light and dark popup surfaces.
+  readonly property color dim: Qt.rgba(
+    foreground.r * 0.45 + Color.muted.r * 0.55,
+    foreground.g * 0.45 + Color.muted.g * 0.55,
+    foreground.b * 0.45 + Color.muted.b * 0.55,
+    foreground.a)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   // Resolved from this file's own location so the plugin works wherever it is
@@ -33,14 +45,14 @@ Panel {
 
   // The Uptime Kuma mark, verbatim upstream art, recoloured at render time:
   // the bar's own foreground while healthy, so it sits with the rest of the
-  // bar, and the theme's urgent colour the moment something is wrong.
+  // bar, and the semantic alert red the moment something is wrong.
   readonly property string logoSource: pluginDir + "/assets/uptime-kuma-mark.svg"
   readonly property bool hasIssue: configured && (!ok || down > 0)
-  // A literal red, not the theme's urgent colour: themes tint urgent towards
-  // their own palette (salmon, maroon, orange), and an outage should read as
-  // red on every theme.
-  readonly property color alertColor: "#e01b24"
-  readonly property color logoColor: hasIssue ? alertColor : foreground
+  // A semantic red, not the theme's urgent colour: themes can tint "red"
+  // toward their own palette (daan-forest uses olive), while an outage must
+  // remain unmistakably red. Use variants with enough contrast for the
+  // current popup surface.
+  readonly property color alertColor: lightTheme ? "#b42318" : "#ff6b6b"
 
   // Nerd Font glyphs, verified against the shell's font.
   readonly property string glyphSetup: String.fromCodePoint(0xF013)
@@ -93,9 +105,9 @@ Panel {
 
   readonly property color statusColor: {
     if (!configured) return pendingColor
-    if (hasIssue) return urgent
+    if (hasIssue) return alertColor
     if (pending > 0) return pendingColor
-    return foreground
+    return barForeground
   }
 
   // "Down count only": the bare mark while everything is healthy.
@@ -203,7 +215,7 @@ Panel {
 
   function statusColorFor(status, fallback) {
     if (status === "up") return upColor
-    if (status === "down") return urgent
+    if (status === "down") return alertColor
     if (status === "pending") return pendingColor
     if (status === "maintenance") return dim
     return fallback
@@ -349,6 +361,7 @@ Panel {
       KumaMark {
         visible: root.configured
         size: Style.space(15)
+        healthyColor: root.barForeground
         anchors.verticalCenter: parent.verticalCenter
       }
 
@@ -424,6 +437,9 @@ Panel {
           meta: root.heroMeta()
           detail: root.heroDetail()
           foreground: root.foreground
+          // PanelHero currently derives its secondary tone with Qt.darker().
+          // On light themes opacity restores the intended visual hierarchy.
+          metaOpacity: root.lightTheme ? 0.72 : 1.0
           fontFamily: root.fontFamily
 
           iconComponent: Component {
@@ -484,7 +500,7 @@ Panel {
             spacing: Style.space(8)
 
             SummaryCell { label: "Up"; value: root.up; active: root.up > 0; tone: root.upColor }
-            SummaryCell { label: "Down"; value: root.down; active: root.down > 0; tone: root.urgent }
+            SummaryCell { label: "Down"; value: root.down; active: root.down > 0; tone: root.alertColor }
             SummaryCell { label: "Pending"; value: root.pending; active: root.pending > 0; tone: root.pendingColor }
             SummaryCell { label: "Maint"; value: root.maintenance; active: root.maintenance > 0; tone: root.foreground }
           }
@@ -601,7 +617,7 @@ Panel {
               width: parent.width
               visible: root.formError !== ""
               text: root.formError
-              color: root.urgent
+              color: root.alertColor
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
@@ -741,6 +757,7 @@ Panel {
   component KumaMark: Item {
     id: kumaMark
     property real size: Style.space(22)
+    property color healthyColor: root.foreground
 
     implicitWidth: size
     implicitHeight: size
@@ -766,7 +783,7 @@ Panel {
       anchors.fill: kumaImage
       source: kumaImage
       colorization: 1.0
-      colorizationColor: root.logoColor
+      colorizationColor: root.hasIssue ? root.alertColor : kumaMark.healthyColor
 
       Behavior on colorizationColor {
         enabled: !root.bar || root.bar.foregroundAnimationEnabled
@@ -808,9 +825,11 @@ Panel {
     width: (parent.width - parent.spacing * 3) / 4
     implicitHeight: summaryLabels.implicitHeight + Style.space(12)
     radius: Style.cornerRadius
+    // Status cards should keep their semantic hue even when a theme defines
+    // the generic selected state as foreground (as daan-forest does).
     color: summaryCell.active
-      ? Style.selectedFillFor(summaryCell.tone, Color.accent)
-      : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.035)
+      ? Qt.rgba(summaryCell.tone.r, summaryCell.tone.g, summaryCell.tone.b, root.lightTheme ? 0.14 : 0.22)
+      : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, root.lightTheme ? 0.045 : 0.06)
 
     Column {
       id: summaryLabels
