@@ -1,0 +1,832 @@
+import QtQuick
+import QtQuick.Controls
+import Quickshell
+import Quickshell.Io
+import qs.Commons
+import qs.Ui
+
+Panel {
+  id: root
+
+  moduleName: "daan.uptime-kuma"
+  ipcTarget: "daan.uptime-kuma"
+
+  readonly property color foreground: bar ? bar.barForeground : Color.foreground
+  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color dim: Qt.darker(foreground, 1.4)
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+
+  // Resolved from this file's own location so the plugin works wherever it is
+  // installed — a clone, a symlink to a dev checkout, or the shipped path.
+  readonly property string pluginDir: {
+    var dir = Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "")
+    return dir.replace(/\/$/, "")
+  }
+  readonly property string stateCommand: pluginDir + "/state.sh"
+  readonly property string saveCommand: pluginDir + "/save-config.sh"
+  readonly property string themeColorsPath: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/current/theme/colors.toml"
+
+  // Theme accents, refreshed from the active theme's colors.toml.
+  property color upColor: Color.accent
+  property color pendingColor: Color.accent
+
+  // The Uptime Kuma mark, green normally and red-shaded when something is
+  // wrong. Two prepared files rather than a runtime tint, so a down state can
+  // never fall back to the healthy colour (see assets/regenerate.sh).
+  readonly property string logoSource: pluginDir + (hasIssue ? "/assets/uptime-kuma-alert.svg" : "/assets/uptime-kuma.svg")
+  readonly property bool hasIssue: configured && (!ok || down > 0)
+
+  // Nerd Font glyphs, verified against the shell's font.
+  readonly property string glyphSetup: String.fromCodePoint(0xF013)
+  readonly property string glyphUp: String.fromCodePoint(0xF05E0)
+  readonly property string glyphDown: String.fromCodePoint(0xF0159)
+  readonly property string glyphPending: String.fromCodePoint(0xF0150)
+  readonly property string glyphMaintenance: String.fromCodePoint(0xF0AD)
+  readonly property string glyphLink: String.fromCodePoint(0xF0339)
+  readonly property string glyphKey: String.fromCodePoint(0xF0306)
+  readonly property string glyphSave: String.fromCodePoint(0xF00C)
+  readonly property string glyphCancel: String.fromCodePoint(0xF00D)
+
+  property var state: ({
+    ok: false,
+    error: "",
+    dashboard: "",
+    config: ({ url: "", hasKey: false, insecure: false, path: "" }),
+    configured: false,
+    monitors: [],
+    total: 0,
+    up: 0,
+    down: 0,
+    pending: 0,
+    maintenance: 0
+  })
+  property bool refreshing: false
+  property string lastUpdated: ""
+
+  readonly property bool ok: state && state.ok === true
+  readonly property bool configured: state && state.configured === true
+  readonly property var config: (state && state.config) ? state.config : ({})
+  readonly property int total: Number(state.total || 0)
+  readonly property int up: Number(state.up || 0)
+  readonly property int down: Number(state.down || 0)
+  readonly property int pending: Number(state.pending || 0)
+  readonly property int maintenance: Number(state.maintenance || 0)
+  readonly property string dashboard: String(state.dashboard || "")
+  readonly property var monitors: state && Array.isArray(state.monitors) ? state.monitors : []
+  readonly property int refreshInterval: Math.max(5, Number(root.setting("interval", 30))) * 1000
+
+  // Setup form state. `setupOpen` is the user asking for it; an unconfigured
+  // instance shows the form regardless, so a fresh install lands on setup.
+  property bool setupOpen: false
+  property string formUrl: ""
+  property string formKey: ""
+  property bool formInsecure: false
+  property string formError: ""
+  property bool saving: false
+  readonly property bool showSetup: setupOpen || !configured
+
+  readonly property color statusColor: {
+    if (!configured) return pendingColor
+    if (!ok || down > 0) return urgent
+    if (pending > 0) return pendingColor
+    return foreground
+  }
+
+  // "Down count only": the bare mark while everything is healthy.
+  readonly property string barCount: (configured && ok && down > 0) ? String(down) : ""
+
+  readonly property string tooltip: {
+    if (!configured) return "Uptime Kuma — click to set up"
+    if (!ok) return "Uptime Kuma — " + (String(state.error || "unavailable"))
+    var parts = [up + " up"]
+    if (down > 0) parts.push(down + " down")
+    if (pending > 0) parts.push(pending + " pending")
+    if (maintenance > 0) parts.push(maintenance + " in maintenance")
+    return "Uptime Kuma — " + parts.join(" · ")
+  }
+
+  visible: true
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
+  function parseState(raw) {
+    try {
+      var parsed = JSON.parse(String(raw || ""))
+      if (parsed && typeof parsed === "object") {
+        state = parsed
+        lastUpdated = Qt.formatTime(new Date(), "HH:mm")
+      }
+    } catch (e) {
+      console.warn("daan.uptime-kuma: invalid state output", e)
+    }
+  }
+
+  function refresh() {
+    if (stateProcess.running) return
+    refreshing = true
+    stateProcess.running = true
+  }
+
+  function loadThemeColors(raw) {
+    var lines = String(raw || "").split("\n")
+    var found = {}
+    for (var i = 0; i < lines.length; i++) {
+      var match = lines[i].match(/^\s*(green|yellow)\s*=\s*["']?(#[0-9A-Fa-f]{6})/)
+      if (match) found[match[1]] = match[2]
+    }
+    upColor = found["green"] || Color.accent
+    pendingColor = found["yellow"] || Color.accent
+  }
+
+  function openDashboard() {
+    if (!bar || dashboard === "") return
+    bar.run("xdg-open " + bar.shellQuote(dashboard))
+    close()
+  }
+
+  // Prefill from the stored config. The API key is never handed back to us, so
+  // the field starts empty and an empty submit keeps whatever is on disk.
+  function openSetup() {
+    formUrl = String(config.url || "")
+    formKey = ""
+    formInsecure = config.insecure === true
+    formError = ""
+    setupOpen = true
+    Qt.callLater(function () { urlField.forceActiveFocus() })
+  }
+
+  function cancelSetup() {
+    if (!configured) return close()
+    setupOpen = false
+    formError = ""
+    Qt.callLater(function () { keyCatcher.forceActiveFocus() })
+  }
+
+  function saveSetup() {
+    if (saving) return
+    var url = formUrl.trim()
+    if (url === "") {
+      formError = "The instance URL is required"
+      return
+    }
+    if (!/^https?:\/\//.test(url)) {
+      formError = "The URL must start with http:// or https://"
+      return
+    }
+
+    formError = ""
+    saving = true
+    saveProcess.payload = JSON.stringify({ url: url, apiKey: formKey, insecure: formInsecure })
+    saveProcess.running = true
+  }
+
+  function statusGlyph(status) {
+    if (status === "up") return glyphUp
+    if (status === "down") return glyphDown
+    if (status === "pending") return glyphPending
+    if (status === "maintenance") return glyphMaintenance
+    return "?"
+  }
+
+  function statusColorFor(status, fallback) {
+    if (status === "up") return upColor
+    if (status === "down") return urgent
+    if (status === "pending") return pendingColor
+    if (status === "maintenance") return dim
+    return fallback
+  }
+
+  function statusLabel(monitor) {
+    var status = String(monitor.status || "unknown")
+    if (status === "up" && monitor.responseTime !== null && monitor.responseTime !== undefined)
+      return monitor.responseTime + " ms"
+    return status.charAt(0).toUpperCase() + status.slice(1)
+  }
+
+  function monitorDetail(monitor) {
+    var target = String(monitor.url || monitor.hostname || "")
+    var kind = String(monitor.type || "")
+    if (target !== "" && kind !== "") return kind + "  ·  " + target
+    return target !== "" ? target : kind
+  }
+
+  function heroMeta() {
+    if (showSetup) return configured ? "SETTINGS" : "SETUP"
+    if (!ok) return "UNAVAILABLE"
+    if (down > 0) return down + (down === 1 ? " MONITOR DOWN" : " MONITORS DOWN")
+    if (pending > 0) return "DEGRADED"
+    if (total === 0) return "NO ACTIVE MONITORS"
+    return "ALL SYSTEMS UP"
+  }
+
+  function heroDetail() {
+    if (showSetup) return configured ? "Update the connection" : "Connect your instance"
+    if (!ok) return String(state.error || "Could not reach Uptime Kuma")
+    var detail = total + (total === 1 ? " active monitor" : " active monitors")
+    if (lastUpdated !== "") detail += "  ·  " + lastUpdated
+    return detail
+  }
+
+  onOpenedChanged: if (opened) {
+    refresh()
+    if (monitorFlick) monitorFlick.contentY = 0
+    if (!configured) Qt.callLater(function () { root.openSetup() })
+    else Qt.callLater(function () { keyCatcher.forceActiveFocus() })
+  }
+
+  Process {
+    id: stateProcess
+    command: [root.stateCommand]
+    running: false
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.parseState(text)
+    }
+
+    onExited: function (exitCode) {
+      root.refreshing = false
+      if (exitCode !== 0) console.warn("daan.uptime-kuma: state command exited", exitCode)
+    }
+  }
+
+  // Writes the config file. The API key goes over stdin, never argv.
+  Process {
+    id: saveProcess
+    property string payload: ""
+    command: [root.saveCommand]
+    running: false
+    stdinEnabled: true
+
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+      stdinEnabled = false
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.formError = text.trim()
+    }
+
+    onExited: function (exitCode) {
+      root.saving = false
+      if (exitCode === 0) {
+        root.formKey = ""
+        root.setupOpen = false
+        root.formError = ""
+        root.refresh()
+        Qt.callLater(function () { keyCatcher.forceActiveFocus() })
+      } else if (root.formError === "") {
+        root.formError = "Could not save the configuration"
+      }
+    }
+  }
+
+  FileView {
+    path: root.themeColorsPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.loadThemeColors(text())
+    onFileChanged: reload()
+    onLoadFailed: {
+      root.upColor = Color.accent
+      root.pendingColor = Color.accent
+    }
+  }
+
+  Timer {
+    interval: root.refreshInterval
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.refresh()
+  }
+
+  WidgetButton {
+    id: button
+    anchors.fill: parent
+    bar: root.bar
+    // The label is replaced by `barContent` below, but `text` still drives the
+    // button's own sizing fallback, so keep it in sync with what we draw.
+    text: root.barCount
+    labelVisible: false
+    hasVisualContent: true
+    active: !root.configured || root.hasIssue || root.pending > 0
+    activeColor: root.statusColor
+    fontSize: Style.font.bodySmall
+    horizontalMargin: 3.5
+    fixedWidth: (root.bar && root.bar.vertical) ? -1 : barContent.implicitWidth + Style.spaceReal(7)
+    tooltipText: root.tooltip
+
+    onPressed: function (buttonCode) {
+      if (buttonCode === Qt.RightButton) root.refresh()
+      else if (buttonCode === Qt.MiddleButton) root.openDashboard()
+      else root.toggle()
+    }
+
+    Row {
+      id: barContent
+      anchors.centerIn: parent
+      spacing: Style.space(3)
+
+      Image {
+        id: barLogo
+        visible: root.configured
+        width: Style.space(15)
+        height: width
+        anchors.verticalCenter: parent.verticalCenter
+        source: root.configured ? root.logoSource : ""
+        // Rasterise above the drawn size so the mark stays crisp on scaled
+        // outputs and while the bar animates.
+        sourceSize.width: Math.round(width * 3)
+        sourceSize.height: Math.round(width * 3)
+        fillMode: Image.PreserveAspectFit
+        smooth: true
+        asynchronous: true
+      }
+
+      Text {
+        visible: !root.configured
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.glyphSetup
+        color: root.statusColor
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Text {
+        visible: root.barCount !== "" && !(root.bar && root.bar.vertical)
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.barCount
+        color: root.statusColor
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+    }
+  }
+
+  KeyboardPanel {
+    id: panel
+    anchorItem: button
+    owner: root
+    bar: root.bar
+    open: root.opened
+    focusTarget: keyCatcher
+    contentWidth: panel.fittedContentWidth(Style.space(400))
+    contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight, Style.space(640))
+
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      // While the form is up its fields own the keyboard; Esc and Enter are
+      // handled on the fields themselves.
+      blocked: root.showSetup
+      onMoveRequested: function (dx, dy) {
+        if (dy !== 0) {
+          monitorFlick.contentY = Math.max(0, Math.min(
+            monitorFlick.contentY + dy * Style.space(58),
+            Math.max(0, monitorFlick.contentHeight - monitorFlick.height)
+          ))
+        }
+      }
+      onActivateRequested: root.refresh()
+      onCloseRequested: root.close()
+      onTabRequested: function (direction) { root.switchPanel(direction) }
+      onTextKey: function (text) {
+        if (text === "r" || text === "R") root.refresh()
+        else if (text === "o" || text === "O") root.openDashboard()
+        else if (text === "s" || text === "S") root.openSetup()
+      }
+
+      Flickable {
+        id: monitorFlick
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: contentColumn.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        Column {
+          id: contentColumn
+          width: monitorFlick.width
+          spacing: Style.space(12)
+
+          PanelHero {
+            width: parent.width
+            title: "Uptime Kuma"
+            meta: root.heroMeta()
+            detail: root.heroDetail()
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+
+            iconComponent: Component {
+              Item {
+                implicitWidth: Style.font.display
+                implicitHeight: Style.font.display
+
+                Image {
+                  anchors.fill: parent
+                  visible: !root.showSetup
+                  source: root.showSetup ? "" : root.logoSource
+                  sourceSize.width: Math.round(width * 3)
+                  sourceSize.height: Math.round(height * 3)
+                  fillMode: Image.PreserveAspectFit
+                  smooth: true
+                  asynchronous: true
+                }
+
+                Text {
+                  anchors.centerIn: parent
+                  visible: root.showSetup
+                  text: root.glyphSetup
+                  // In the form the icon is chrome, not status — only an
+                  // unconfigured instance tints it, as a nudge to finish setup.
+                  color: root.configured ? root.foreground : root.pendingColor
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.display
+                }
+              }
+            }
+
+            trailingControl: Component {
+              PanelActionButton {
+                visible: root.configured && !root.showSetup
+                iconText: root.glyphSetup
+                tooltipText: "Settings"
+                foreground: root.dim
+                hoverColor: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.openSetup()
+              }
+            }
+          }
+
+          // ── Setup form ────────────────────────────────────────────────
+
+          Column {
+            id: setupColumn
+            visible: root.showSetup
+            width: parent.width
+            spacing: Style.space(10)
+
+            PanelSeparator { foreground: root.foreground }
+
+            PanelSectionHeader {
+              width: parent.width
+              text: "CONNECTION"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            FieldLabel { glyph: root.glyphLink; label: "Instance URL" }
+
+            TextField {
+              id: urlField
+              width: parent.width
+              placeholderText: "https://kuma.example.com"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              enabled: !root.saving
+              text: root.formUrl
+
+              onTextChanged: if (text !== root.formUrl) root.formUrl = text
+              onAccepted: keyField.forceActiveFocus()
+              Keys.onEscapePressed: root.cancelSetup()
+            }
+
+            FieldLabel { glyph: root.glyphKey; label: "API key" }
+
+            TextField {
+              id: keyField
+              width: parent.width
+              password: true
+              placeholderText: root.config.hasKey === true ? "•••••••••   leave blank to keep" : "uk1_…"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              enabled: !root.saving
+              text: root.formKey
+
+              onTextChanged: if (text !== root.formKey) root.formKey = text
+              onAccepted: root.saveSetup()
+              Keys.onEscapePressed: root.cancelSetup()
+            }
+
+            Text {
+              width: parent.width
+              text: "Uptime Kuma → Profile → Settings → API Keys → Add API Key"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Toggle {
+              width: parent.width
+              label: "Allow self-signed certificate"
+              description: "Only for instances behind a private CA"
+              checked: root.formInsecure
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.formInsecure = !root.formInsecure
+            }
+
+            Text {
+              width: parent.width
+              visible: root.formError !== ""
+              text: root.formError
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                text: root.saving ? "Saving…" : "Save & test"
+                iconText: root.glyphSave
+                bordered: true
+                enabled: !root.saving
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.body
+                onClicked: root.saveSetup()
+              }
+
+              Button {
+                text: root.configured ? "Cancel" : "Close"
+                iconText: root.glyphCancel
+                bordered: true
+                enabled: !root.saving
+                foreground: root.dim
+                fontFamily: root.fontFamily
+                fontSize: Style.font.body
+                onClicked: root.cancelSetup()
+              }
+            }
+
+            Text {
+              width: parent.width
+              text: "Stored in " + String(root.config.path || "~/.config/omarchy/uptime-kuma.json").replace(Quickshell.env("HOME") || "", "~")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideMiddle
+            }
+          }
+
+          // ── Error state ───────────────────────────────────────────────
+
+          Column {
+            visible: !root.showSetup && !root.ok
+            width: parent.width
+            spacing: Style.space(12)
+
+            Text {
+              width: parent.width
+              text: String(root.state.error || "Could not reach Uptime Kuma")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+              topPadding: Style.space(16)
+            }
+
+            Row {
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.space(8)
+
+              Button {
+                text: "Retry"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.body
+                onClicked: root.refresh()
+              }
+
+              Button {
+                text: "Settings"
+                iconText: root.glyphSetup
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.body
+                onClicked: root.openSetup()
+              }
+            }
+          }
+
+          // ── Monitors ──────────────────────────────────────────────────
+
+          PanelSeparator {
+            visible: !root.showSetup && root.ok
+            foreground: root.foreground
+          }
+
+          Column {
+            visible: !root.showSetup && root.ok
+            width: parent.width
+            spacing: Style.space(8)
+
+            PanelSectionHeader {
+              text: "OVERVIEW"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              SummaryCell { label: "Up"; value: root.up; active: root.up > 0; tone: root.upColor }
+              SummaryCell { label: "Down"; value: root.down; active: root.down > 0; tone: root.urgent }
+              SummaryCell { label: "Pending"; value: root.pending; active: root.pending > 0; tone: root.pendingColor }
+              SummaryCell { label: "Maint"; value: root.maintenance; active: root.maintenance > 0; tone: root.foreground }
+            }
+          }
+
+          PanelSeparator {
+            visible: !root.showSetup && root.ok && root.monitors.length > 0
+            foreground: root.foreground
+          }
+
+          Column {
+            visible: !root.showSetup && root.ok && root.monitors.length > 0
+            width: parent.width
+            spacing: Style.space(8)
+
+            PanelSectionHeader {
+              width: parent.width
+              text: "MONITORS  ·  " + root.total
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.monitors
+
+              MonitorRow {
+                width: parent ? parent.width : 0
+                monitor: modelData
+                rowIndex: index
+              }
+            }
+          }
+
+          Text {
+            visible: !root.showSetup && root.ok
+            width: parent.width
+            text: "R refresh  ·  O dashboard  ·  S settings  ·  Esc close"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            horizontalAlignment: Text.AlignHCenter
+            topPadding: Style.space(4)
+          }
+        }
+      }
+    }
+  }
+
+  component FieldLabel: Row {
+    id: fieldLabel
+    property string glyph: ""
+    property string label: ""
+
+    spacing: Style.space(6)
+
+    Text {
+      text: fieldLabel.glyph
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Text {
+      text: fieldLabel.label
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+  }
+
+  component SummaryCell: Rectangle {
+    id: summaryCell
+    property string label: ""
+    property int value: 0
+    property bool active: false
+    property color tone: root.foreground
+
+    width: (parent.width - parent.spacing * 3) / 4
+    implicitHeight: summaryLabels.implicitHeight + Style.space(12)
+    radius: Style.cornerRadius
+    color: summaryCell.active
+      ? Style.selectedFillFor(summaryCell.tone, Color.accent)
+      : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.035)
+
+    Column {
+      id: summaryLabels
+      anchors.centerIn: parent
+      spacing: Style.space(2)
+
+      Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: summaryCell.value
+        color: summaryCell.active ? summaryCell.tone : root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.subtitle
+        font.bold: true
+      }
+
+      Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: summaryCell.label.toUpperCase()
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+      }
+    }
+  }
+
+  component MonitorRow: Column {
+    id: monitorRow
+    property var monitor: ({})
+    property int rowIndex: 0
+    readonly property string status: String(monitorRow.monitor.status || "unknown")
+
+    spacing: Style.space(8)
+
+    PanelSeparator {
+      visible: monitorRow.rowIndex > 0
+      foreground: root.foreground
+      strength: 0.07
+    }
+
+    Item {
+      width: monitorRow.width
+      implicitHeight: Math.max(monitorGlyph.implicitHeight, monitorLabels.implicitHeight, monitorStatus.implicitHeight)
+
+      Text {
+        id: monitorGlyph
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.statusGlyph(monitorRow.status)
+        color: root.statusColorFor(monitorRow.status, root.foreground)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.subtitle
+      }
+
+      Column {
+        id: monitorLabels
+        anchors.left: monitorGlyph.right
+        anchors.leftMargin: Style.space(10)
+        anchors.right: monitorStatus.left
+        anchors.rightMargin: Style.space(12)
+        spacing: Style.space(2)
+
+        Text {
+          width: parent.width
+          text: String(monitorRow.monitor.name || "Monitor")
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: monitorRow.status === "down" || monitorRow.status === "pending"
+          elide: Text.ElideRight
+        }
+
+        Text {
+          width: parent.width
+          visible: text !== ""
+          text: root.monitorDetail(monitorRow.monitor)
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideMiddle
+        }
+      }
+
+      Text {
+        id: monitorStatus
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.statusLabel(monitorRow.monitor)
+        color: monitorRow.status === "up" ? root.dim : root.statusColorFor(monitorRow.status, root.dim)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: monitorRow.status === "down"
+      }
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "daan.uptime-kuma",
+  "name": "Uptime Kuma",
+  "version": "1.0.0",
+  "author": "Daan Lenaerts",
+  "description": "Show the status of every active Uptime Kuma monitor in a bar popup.",
+  "license": "MIT",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Uptime Kuma",
+    "description": "Active monitor status from Uptime Kuma",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "interval": 30
+    },
+    "schema": [
+      {
+        "key": "interval",
+        "type": "number",
+        "label": "Refresh interval (seconds)"
+      }
+    ]
+  }
+}
