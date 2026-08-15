@@ -45,7 +45,6 @@ Click the widget. An unconfigured plugin opens straight into its setup form:
 
 - **Instance URL** — e.g. `https://kuma.example.com`
 - **API key** — Uptime Kuma → Profile → Settings → API Keys → Add API Key
-- **Allow self-signed certificate** — only for instances behind a private CA
 
 **Save & test** writes the config and immediately reconnects, so a bad URL or
 key shows up right there in the panel. Reopen the form any time with the cog in
@@ -55,7 +54,10 @@ Credentials are written to `~/.config/omarchy/uptime-kuma.json` with mode
 `600` — deliberately outside the plugin directory, so this repo can be
 committed and shared without leaking the key. The key is passed to the writer
 over stdin, never argv, and is never read back into the form: leave the API key
-field blank to keep the stored one.
+field blank to keep the stored one. Polling also supplies the key to `curl` over
+stdin, keeping it out of local process listings. HTTPS with normal certificate
+verification is required so credentials and monitor data are protected in
+transit.
 
 `UPTIME_KUMA_URL` and `UPTIME_KUMA_API_KEY` override the file when set.
 
@@ -105,6 +107,9 @@ The panel replaces the monitor list with the failure and offers **Retry** and
 - **Unreachable** — DNS/network/TLS failure, or the instance is down
 - **Unauthorized** — bad or revoked API key
 - **No /metrics endpoint** — the URL points somewhere other than Uptime Kuma
+- **HTTPS is required** — replace a legacy plain-HTTP instance URL with HTTPS
+- **TLS certificate verification cannot be disabled** — remove the legacy
+  `"insecure": true` setting and configure a trusted certificate
 
 ## Credits
 

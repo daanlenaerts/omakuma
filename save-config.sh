@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Write ~/.config/omarchy/uptime-kuma.json from a JSON object on stdin.
 #
-# The setup panel pipes {"url":…,"apiKey":…,"insecure":…} in here. The API key
+# The setup panel pipes {"url":…,"apiKey":…} in here. The API key
 # goes over stdin, never argv, so it never shows up in /proc or a shell history.
 #
 # An empty/absent apiKey keeps whatever key is already stored, which lets the
@@ -27,7 +27,9 @@ jq -e . >/dev/null 2>&1 <<<"$input" || die "Malformed configuration"
 
 url="$(jq -r '.url // "" | sub("/+$"; "")' <<<"$input")"
 [[ -z "$url" ]] && die "The instance URL is required"
-[[ "$url" =~ ^https?:// ]] || die "The URL must start with http:// or https://"
+[[ "$url" == https://* ]] || die "The URL must start with https://"
+[[ "$(jq -r '(.insecure // false) | tostring' <<<"$input")" != "true" ]] || \
+  die "TLS certificate verification cannot be disabled"
 
 # Keep the stored key when the panel submits an empty one.
 existing_key=""
@@ -45,11 +47,9 @@ jq -n \
   --arg url "$url" \
   --arg key "$(jq -r '.apiKey // ""' <<<"$input")" \
   --arg existing "$existing_key" \
-  --argjson insecure "$(jq -r '(.insecure // false) | tostring' <<<"$input")" \
   '{
     url: $url,
-    apiKey: (if $key == "" then $existing else $key end),
-    insecure: $insecure
+    apiKey: (if $key == "" then $existing else $key end)
   }' >"$tmp" || die "Could not build the configuration"
 
 mv -f "$tmp" "$config" || die "Could not save $config"

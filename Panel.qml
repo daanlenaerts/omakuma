@@ -69,7 +69,7 @@ Panel {
     ok: false,
     error: "",
     dashboard: "",
-    config: ({ url: "", hasKey: false, insecure: false, path: "" }),
+    config: ({ url: "", hasKey: false, path: "" }),
     configured: false,
     monitors: [],
     total: 0,
@@ -98,7 +98,6 @@ Panel {
   property bool setupOpen: false
   property string formUrl: ""
   property string formKey: ""
-  property bool formInsecure: false
   property string formError: ""
   property bool saving: false
   readonly property bool showSetup: setupOpen || !configured
@@ -174,7 +173,6 @@ Panel {
   function openSetup() {
     formUrl = String(config.url || "")
     formKey = ""
-    formInsecure = config.insecure === true
     formError = ""
     setupOpen = true
     Qt.callLater(function () { urlField.forceActiveFocus() })
@@ -194,14 +192,14 @@ Panel {
       formError = "The instance URL is required"
       return
     }
-    if (!/^https?:\/\//.test(url)) {
-      formError = "The URL must start with http:// or https://"
+    if (!/^https:\/\//.test(url)) {
+      formError = "The URL must start with https://"
       return
     }
 
     formError = ""
     saving = true
-    saveProcess.payload = JSON.stringify({ url: url, apiKey: formKey, insecure: formInsecure })
+    saveProcess.payload = JSON.stringify({ url: url, apiKey: formKey })
     saveProcess.running = true
   }
 
@@ -601,16 +599,6 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
-            }
-
-            Toggle {
-              width: parent.width
-              label: "Allow self-signed certificate"
-              description: "Only for instances behind a private CA"
-              checked: root.formInsecure
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: root.formInsecure = !root.formInsecure
             }
 
             Text {

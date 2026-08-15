@@ -5,7 +5,7 @@
 # writes (see save-config.sh). The file lives outside the plugin directory so
 # the API key never lands in a dotfiles repo:
 #
-#   { "url": "https://kuma.example.com", "apiKey": "uk1_...", "insecure": false }
+#   { "url": "https://kuma.example.com", "apiKey": "uk1_..." }
 #
 # UPTIME_KUMA_URL / UPTIME_KUMA_API_KEY override the config file when set.
 #
@@ -20,7 +20,7 @@ config="${UPTIME_KUMA_CONFIG:-$HOME/.config/omarchy/uptime-kuma.json}"
 url="${UPTIME_KUMA_URL:-}"
 api_key="${UPTIME_KUMA_API_KEY:-}"
 insecure="false"
-config_obj='{"url":"","hasKey":false,"insecure":false,"path":""}'
+config_obj='{"url":"","hasKey":false,"path":""}'
 
 fail() {
   jq -cn \
@@ -52,23 +52,35 @@ has_key="false"
 config_obj="$(jq -cn \
   --arg url "$url" \
   --argjson hasKey "$has_key" \
-  --argjson insecure "${insecure:-false}" \
   --arg path "$config" \
-  '{url: $url, hasKey: $hasKey, insecure: $insecure, path: $path}')"
+  '{url: $url, hasKey: $hasKey, path: $path}')"
 
 [[ -z "$url" ]] && fail "Not configured"
-
-curl_args=(--silent --show-error --max-time 8 --user ":$api_key")
-[[ "$insecure" == "true" ]] && curl_args+=(--insecure)
+[[ "$url" != https://* ]] && fail "HTTPS is required to protect the API key and monitor data"
+[[ "$insecure" == "true" ]] && fail "TLS certificate verification cannot be disabled"
 
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
 
-code="$(curl "${curl_args[@]}" --output "$body" --write-out '%{http_code}' "$url/metrics" 2>/dev/null)" || code="000"
+# curl's config parser accepts credentials on stdin. This keeps the API key out
+# of curl's command line (and therefore out of ps and /proc/*/cmdline). Uptime
+# Kuma API keys use an argv-safe character set, but escape characters that are
+# special inside a quoted curl config value as a defense in depth.
+curl_config_key="${api_key//\\/\\\\}"
+curl_config_key="${curl_config_key//\"/\\\"}"
+curl_config_key="${curl_config_key//$'\n'/\\n}"
+curl_config_key="${curl_config_key//$'\r'/\\r}"
+curl_config_key="${curl_config_key//$'\t'/\\t}"
+code="$(
+  printf 'user = ":%s"\n' "$curl_config_key" |
+    curl -q --config - --no-insecure --silent --show-error --max-time 8 \
+      --output "$body" --write-out '%{http_code}' "$url/metrics" 2>/dev/null
+)" || code="000"
+unset curl_config_key
 
 case "$code" in
   200) ;;
-  000) fail "Unreachable — check the URL, or tick self-signed if it uses a private certificate" ;;
+  000) fail "Unreachable — check the URL, network, and certificate trust" ;;
   401 | 403) fail "Unauthorized — check the API key" ;;
   404) fail "No /metrics endpoint here — is this an Uptime Kuma instance?" ;;
   *) fail "HTTP $code" ;;
