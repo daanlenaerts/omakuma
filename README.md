@@ -8,7 +8,7 @@ response time.
 The bar stays quiet while everything is healthy — just the Kuma mark. The
 moment a monitor goes down the mark turns red and picks up a count.
 
-![The Uptime Kuma panel listing active monitors](screenshot.png)
+![The Uptime Kuma panel listing active monitors](preview.png)
 
 ## How it works
 
