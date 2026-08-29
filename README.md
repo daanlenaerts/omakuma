@@ -96,7 +96,7 @@ Refresh interval defaults to 30s and is configurable per widget in
 | `state.sh` | Fetches `/metrics` and emits the state JSON |
 | `parse.jq` | Prometheus text → state JSON |
 | `save-config.sh` | Validates and writes the config file |
-| `assets/` | The Kuma mark, healthy and alert variants |
+| `assets/` | The Kuma mark and the script that derives it |
 
 ## Troubleshooting
 
@@ -115,9 +115,10 @@ The panel replaces the monitor list with the failure and offers **Retry** and
 
 The Kuma mark in `assets/` comes from
 [louislam/uptime-kuma](https://github.com/louislam/uptime-kuma) (`public/icon.svg`,
-MIT). `assets/upstream-icon.svg` is that file verbatim; `assets/regenerate.sh`
-documents and reapplies the two changes that make it legible at bar sizes, and
-derives the red alert variant by hue-rotating the gradient stops.
+MIT). `assets/uptime-kuma.svg` is that file verbatim; `assets/regenerate.sh`
+documents and reapplies the change that makes it legible at bar sizes, and
+`assets/regenerate.sh --path` reprints the outline that `Panel.qml` fills with
+the bar's own colour.
 
 Uptime Kuma is a trademark of its authors; this plugin is an unofficial
 integration.

@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Effects
+import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -43,10 +43,15 @@ Panel {
   property color upColor: Color.accent
   property color pendingColor: Color.accent
 
-  // The Uptime Kuma mark, verbatim upstream art, recoloured at render time:
+  // The Uptime Kuma mark, drawn as a filled vector so it takes a flat colour:
   // the bar's own foreground while healthy, so it sits with the rest of the
   // bar, and the semantic alert red the moment something is wrong.
-  readonly property string logoSource: pluginDir + "/assets/uptime-kuma-mark.svg"
+  //
+  // The path is the mark's own outline from assets/uptime-kuma-mark.svg, with
+  // that file's translate(320, 320) folded into the coordinates so it fills the
+  // artwork's 640x640 box directly. `assets/regenerate.sh --path` reprints it.
+  readonly property string markPath: "M 490.4 235.64 C 544.09 358.38 544.09 435.34 490.4 466.5 C 409.85 513.24 199.96 527.49 139.54 455.64 C 99.26 407.74 99.26 334.4 139.54 235.64 C 180.5 168.18 238.71 134.45 314.17 134.45 C 389.64 134.45 448.38 168.18 490.4 235.64 z"
+  readonly property real markBox: 640
   readonly property bool hasIssue: configured && (!ok || down > 0)
   // A semantic red, not the theme's urgent colour: themes can tint "red"
   // toward their own palette (daan-forest uses olive), while an outage must
@@ -739,9 +744,16 @@ Panel {
     }
   }
 
-  // The upstream mark, recoloured to a flat theme colour the way the bar
-  // recolours symbolic tray icons: the art is layered and hidden, and the
-  // effect draws it.
+  // The upstream mark, filled with a flat theme colour the way the bar draws
+  // its other glyphs. Recolouring the artwork with MultiEffect's colorization
+  // instead would keep the source gradient's lightness, so asking for white --
+  // which the bar does whenever it goes transparent and picks a foreground
+  // that contrasts with the wallpaper -- returned a mid grey next to genuinely
+  // white icons. A filled path takes the requested colour exactly.
+  //
+  // The path is drawn in the artwork's own 640x640 coordinates and scaled down
+  // to `size`; the curve renderer antialiases analytically, so the mark stays
+  // clean at bar sizes and on fractionally scaled outputs.
   component KumaMark: Item {
     id: kumaMark
     property real size: Style.space(22)
@@ -752,30 +764,26 @@ Panel {
     width: size
     height: size
 
-    Image {
-      id: kumaImage
-      anchors.fill: parent
-      source: root.logoSource
-      // Rasterise above the drawn size so the mark stays crisp on scaled
-      // outputs and while the bar animates.
-      sourceSize.width: Math.round(kumaMark.size * 3)
-      sourceSize.height: Math.round(kumaMark.size * 3)
-      fillMode: Image.PreserveAspectFit
-      smooth: true
-      asynchronous: true
-      visible: false
-      layer.enabled: true
-    }
+    Shape {
+      width: root.markBox
+      height: root.markBox
+      preferredRendererType: Shape.CurveRenderer
+      transform: Scale {
+        xScale: kumaMark.size / root.markBox
+        yScale: kumaMark.size / root.markBox
+      }
 
-    MultiEffect {
-      anchors.fill: kumaImage
-      source: kumaImage
-      colorization: 1.0
-      colorizationColor: root.hasIssue ? root.alertColor : kumaMark.healthyColor
+      ShapePath {
+        strokeWidth: 0
+        strokeColor: "transparent"
+        fillColor: root.hasIssue ? root.alertColor : kumaMark.healthyColor
 
-      Behavior on colorizationColor {
-        enabled: !root.bar || root.bar.foregroundAnimationEnabled
-        ColorAnimation { duration: 160 }
+        Behavior on fillColor {
+          enabled: !root.bar || root.bar.foregroundAnimationEnabled
+          ColorAnimation { duration: 160 }
+        }
+
+        PathSvg { path: root.markPath }
       }
     }
   }
