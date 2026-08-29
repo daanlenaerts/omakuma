@@ -168,6 +168,13 @@ Panel {
     close()
   }
 
+  function openMonitorUrl(url) {
+    if (!bar || url === "") return
+    // Match ordinary desktop links: xdg-open delegates to the running browser,
+    // which preserves Chromium's active-profile/window routing.
+    bar.run("xdg-open " + shellQuote(url))
+  }
+
   // Prefill from the stored config. The API key is never handed back to us, so
   // the field starts empty and an empty submit keeps whatever is on disk.
   function openSetup() {
@@ -224,6 +231,13 @@ Panel {
     if (status === "up" && monitor.responseTime !== null && monitor.responseTime !== undefined)
       return monitor.responseTime + " ms"
     return status.charAt(0).toUpperCase() + status.slice(1)
+  }
+
+  function monitorUrl(monitor) {
+    var target = String(monitor.url || "")
+    // Only launch complete web URLs. Ping, push, group, and hostname-only
+    // monitors remain informational rather than becoming misleading links.
+    return /^https?:\/\/\S+$/i.test(target) ? target : ""
   }
 
   function monitorDetail(monitor) {
@@ -849,6 +863,7 @@ Panel {
     property var monitor: ({})
     property int rowIndex: 0
     readonly property string status: String(monitorRow.monitor.status || "unknown")
+    readonly property string targetUrl: root.monitorUrl(monitorRow.monitor)
 
     spacing: Style.space(8)
 
@@ -861,6 +876,10 @@ Panel {
     Item {
       width: monitorRow.width
       implicitHeight: Math.max(monitorGlyph.implicitHeight, monitorLabels.implicitHeight, monitorStatus.implicitHeight)
+      // A positioner uses an Item's actual height, not its implicit height.
+      // Without this, the labels still paint but the row has a zero-size
+      // pointer hitbox, so URL clicks can never reach the handler.
+      height: implicitHeight
 
       Text {
         id: monitorGlyph
@@ -910,6 +929,15 @@ Panel {
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         font.bold: monitorRow.status === "down"
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        enabled: monitorRow.targetUrl !== ""
+        hoverEnabled: enabled
+        preventStealing: true
+        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+        onClicked: root.openMonitorUrl(monitorRow.targetUrl)
       }
     }
   }
